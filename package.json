@@ -1,0 +1,47 @@
+{
+  "name": "corrosion-probe-desktop",
+  "version": "1.0.0",
+  "description": "石化炼化装置腐蚀探针数据采集桌面应用",
+  "main": "electron/main.js",
+  "author": "设备科",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "dev:vite": "vite",
+    "dev:electron": "cross-env NODE_ENV=development electron .",
+    "build": "vite build",
+    "build:electron": "electron-builder -c electron-builder.config.js",
+    "dist": "npm run build && npm run build:electron",
+    "test": "node tests/run-protocol.test.js && node tests/run-services.test.js",
+    "test:protocol": "node tests/run-protocol.test.js",
+    "test:services": "node tests/run-services.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "chart.js": "^4.4.4",
+    "dayjs": "^1.11.13",
+    "jspdf": "^2.5.2",
+    "jspdf-autotable": "^3.8.3",
+    "react": "^18.3.1",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "serialport": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.0.5",
+    "vite": "^5.4.6",
+    "vitest": "^2.1.1",
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.example.corrosion-probe",
+    "productName": "腐蚀探针数据采集系统"
+  }
+}
