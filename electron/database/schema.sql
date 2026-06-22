@@ -63,3 +63,29 @@ CREATE TABLE IF NOT EXISTS app_config (
   value TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS probe_group (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT,
+  device_addresses TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_alarm_rule (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL,
+  rule_type TEXT NOT NULL,
+  threshold REAL NOT NULL,
+  level TEXT NOT NULL DEFAULT 'warning',
+  window_hours INTEGER NOT NULL DEFAULT 24,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (group_id) REFERENCES probe_group(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_alarm_rule_group 
+  ON group_alarm_rule(group_id);

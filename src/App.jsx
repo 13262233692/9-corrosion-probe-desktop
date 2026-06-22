@@ -6,6 +6,7 @@ import ConfigPanel from './components/ConfigPanel';
 import DeviceManager from './components/DeviceManager';
 import ReportExport from './components/ReportExport';
 import DeviceStatus from './components/DeviceStatus';
+import MultiCompareView from './components/MultiCompareView';
 
 const api = window.electronAPI;
 
@@ -100,6 +101,7 @@ function App() {
   const tabs = [
     { key: 'realtime', label: '实时监控' },
     { key: 'history', label: '历史趋势' },
+    { key: 'compare', label: '多设备对比' },
     { key: 'alarms', label: `报警列表${unacknowledgedCount > 0 ? ` (${unacknowledgedCount})` : ''}` },
     { key: 'devices', label: '设备管理' },
     { key: 'report', label: '报告导出' },
@@ -173,6 +175,9 @@ function App() {
             )}
             {activeTab === 'history' && (
               <HistoryTrend device={selectedDevice} />
+            )}
+            {activeTab === 'compare' && (
+              <MultiCompareView />
             )}
             {activeTab === 'alarms' && (
               <AlarmList onAcknowledge={loadUnacknowledged} />

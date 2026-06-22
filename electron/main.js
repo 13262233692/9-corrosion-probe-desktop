@@ -9,7 +9,9 @@ const {
   probeReadingRepo,
   corrosionRateRepo,
   alarmEventRepo,
-  configRepo
+  configRepo,
+  probeGroupRepo,
+  groupAlarmRuleRepo
 } = require('./database');
 
 const { serialManager } = require('./serial');
@@ -23,9 +25,11 @@ const {
 const {
   exportCsv,
   exportPdf,
-  generateInspectionReport
+  generateInspectionReport,
+  exportComparisonReport
 } = require('./services/report');
 const { temperatureCompensation } = require('./protocol');
+const { groupComparisonService } = require('./services/groupComparison');
 
 let mainWindow = null;
 let rateCalcTimer = null;
@@ -307,6 +311,148 @@ function setupIpcHandlers() {
       return { success: false, error: err.message };
     }
   });
+
+  ipcMain.handle('group:list', () => {
+    try {
+      return { success: true, data: probeGroupRepo.findAll() };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group:create', (event, group) => {
+    try {
+      const id = probeGroupRepo.create(group);
+      return { success: true, data: { id, ...group } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group:update', (event, id, updates) => {
+    try {
+      const changes = probeGroupRepo.update(id, updates);
+      return { success: true, data: { changes } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group:delete', (event, id) => {
+    try {
+      const changes = probeGroupRepo.delete(id);
+      return { success: true, data: { changes } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group:get', (event, id) => {
+    try {
+      return { success: true, data: probeGroupRepo.findById(id) };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group-rule:list', (event, groupId) => {
+    try {
+      const data = groupId
+        ? groupAlarmRuleRepo.findByGroupId(groupId)
+        : groupAlarmRuleRepo.findAll();
+      return { success: true, data };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group-rule:create', (event, rule) => {
+    try {
+      const id = groupAlarmRuleRepo.create(rule);
+      return { success: true, data: { id, ...rule } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group-rule:update', (event, id, updates) => {
+    try {
+      const changes = groupAlarmRuleRepo.update(id, updates);
+      return { success: true, data: { changes } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('group-rule:delete', (event, id) => {
+    try {
+      const changes = groupAlarmRuleRepo.delete(id);
+      return { success: true, data: { changes } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('comparison:rates', (event, deviceAddresses, options) => {
+    try {
+      const data = groupComparisonService.getMultiDeviceRates(deviceAddresses, options);
+      return { success: true, data };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('comparison:trends', (event, deviceAddresses, startTime, endTime, options) => {
+    try {
+      const data = groupComparisonService.getMultiDeviceTrends(
+        deviceAddresses, startTime, endTime, options
+      );
+      return { success: true, data };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('comparison:evaluate', (event, groupId) => {
+    try {
+      const data = groupId
+        ? groupComparisonService.evaluateGroup(groupId)
+        : groupComparisonService.evaluateAllGroups();
+      return { success: true, data };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('comparison:report', (event, deviceAddresses, options) => {
+    try {
+      const data = groupComparisonService.generateComparisonReport(deviceAddresses, options);
+      return { success: true, data };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('report:export-comparison', async (event, deviceAddresses, options) => {
+    try {
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: '导出对比报告',
+        defaultPath: `多设备对比报告_${Date.now()}.${options?.format || 'pdf'}`,
+        filters: options?.format === 'csv'
+          ? [{ name: 'CSV 文件', extensions: ['csv'] }]
+          : [{ name: 'PDF 文件', extensions: ['pdf'] }]
+      });
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true };
+      }
+
+      const filePath = exportComparisonReport(result.filePath, deviceAddresses, options);
+      return { success: true, data: { filePath } };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
 }
 
 function setupSerialEvents() {
@@ -381,6 +527,21 @@ function startRateCalculation() {
         }
       } catch (e) {}
     }
+
+    try {
+      const evalResult = groupComparisonService.evaluateAllGroups();
+      const allAlarms = [];
+      for (const grp of evalResult.results || []) {
+        if (grp.alarms && grp.alarms.length > 0) {
+          for (const a of grp.alarms) {
+            allAlarms.push(a);
+          }
+        }
+      }
+      if (allAlarms.length > 0 && mainWindow) {
+        mainWindow.webContents.send('group-alarm:new', allAlarms);
+      }
+    } catch (e) {}
   }, 60 * 1000);
 }
 

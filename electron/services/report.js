@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { deviceRepo, probeReadingRepo, corrosionRateRepo, alarmEventRepo } = require('../database');
+const { groupComparisonService } = require('./groupComparison');
 
 let jsPDF = null;
 let autoTable = null;
@@ -258,10 +259,191 @@ function generateInspectionReport(type, deviceAddresses, startTime, endTime) {
   return result;
 }
 
+function generateComparisonReport(deviceAddresses, options = {}) {
+  const result = groupComparisonService.generateComparisonReport(deviceAddresses, options);
+
+  const deviceInfos = deviceAddresses.map(addr => {
+    const device = deviceRepo.findByAddress(addr);
+    return device || { device_address: addr, name: `设备#${addr}` };
+  });
+
+  return {
+    generated_at: Date.now(),
+    window_hours: options.windowHours || 24,
+    devices: deviceInfos,
+    ...result
+  };
+}
+
+function exportComparisonReport(filePath, deviceAddresses, options = {}) {
+  const format = options?.format || (filePath.toLowerCase().endsWith('.csv') ? 'csv' : 'pdf');
+  const report = generateComparisonReport(deviceAddresses, options);
+
+  if (format === 'csv') {
+    return _exportComparisonCsv(filePath, report);
+  } else {
+    return _exportComparisonPdf(filePath, report);
+  }
+}
+
+function _exportComparisonCsv(filePath, report) {
+  let csv = '\uFEFF';
+
+  csv += '多设备对比分析报告\n';
+  csv += `生成时间,${new Date(report.generated_at).toLocaleString('zh-CN')}\n`;
+  csv += `分析窗口,${report.window_hours}小时\n\n`;
+
+  csv += '一、对比设备\n';
+  csv += '地址,名称,位置,类型,初始电阻(mΩ)\n';
+  for (const d of report.devices) {
+    csv += `${d.device_address},${d.name},${d.location || '-'},${d.probe_type || '-'},${d.initial_resistance || 0}\n`;
+  }
+  csv += '\n';
+
+  csv += '二、单设备腐蚀速率\n';
+  csv += '设备,速率(mm/y),样本数,状态\n';
+  for (const r of report.details) {
+    const status = r.error ? `错误:${r.error}` : (r.sample_count >= 2 ? '正常' : '采样不足');
+    csv += `${r.device_name},${r.rate.toFixed(6)},${r.sample_count},${status}\n`;
+  }
+  csv += '\n';
+
+  csv += '三、对比统计\n';
+  const s = report.summary || {};
+  csv += `有效设备数,${s.valid_devices || 0}/${s.total_devices || 0}\n`;
+  csv += `平均速率,${s.mean_rate ? s.mean_rate.toFixed(6) : '-'} mm/y\n`;
+  csv += `最低速率,${s.min_rate ? s.min_rate.toFixed(6) : '-'} mm/y (${s.slowest_device?.device_name || '-'})\n`;
+  csv += `最高速率,${s.max_rate ? s.max_rate.toFixed(6) : '-'} mm/y (${s.fastest_device?.device_name || '-'})\n`;
+  csv += `最大偏差率,${s.max_deviation_ratio ? (s.max_deviation_ratio * 100).toFixed(1) : 0}%\n`;
+  csv += `超阈值设备数,${s.over_threshold_count || 0}\n\n`;
+
+  csv += '四、分析结论\n';
+  (report.conclusions || [report.conclusion]).forEach((line, i) => {
+    csv += `结论${i + 1},${line}\n`;
+  });
+
+  fs.writeFileSync(filePath, csv, 'utf-8');
+  return filePath;
+}
+
+function _exportComparisonPdf(filePath, report) {
+  loadPdfLibs();
+
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+
+  doc.setFontSize(18);
+  doc.setFont('helvetica', 'bold');
+  doc.text('多设备腐蚀对比分析报告', pageWidth / 2, 20, { align: 'center' });
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`生成时间: ${new Date(report.generated_at).toLocaleString('zh-CN')}`, 14, 30);
+  doc.text(`分析窗口: ${report.window_hours}小时`, 14, 36);
+
+  let yPos = 45;
+
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('一、对比设备清单', 14, yPos);
+  yPos += 8;
+
+  const deviceRows = report.devices.map((d, i) => [
+    i + 1,
+    d.device_address,
+    d.name,
+    d.location || '-',
+    d.initial_resistance || 0
+  ]);
+
+  autoTable(doc, {
+    startY: yPos,
+    head: [['序号', '地址', '名称', '位置', '初始电阻(mΩ)']],
+    body: deviceRows,
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 3 },
+    headStyles: { fillColor: [66, 139, 202] }
+  });
+
+  yPos = doc.lastAutoTable.finalY + 10;
+
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('二、单设备腐蚀速率对比', 14, yPos);
+  yPos += 8;
+
+  const rateRows = report.details.map((r, i) => [
+    i + 1,
+    r.device_name,
+    r.rate.toFixed(6),
+    r.sample_count,
+    r.error ? '错误' : (r.sample_count >= 2 ? '有效' : '采样不足')
+  ]);
+
+  autoTable(doc, {
+    startY: yPos,
+    head: [['序号', '设备', '速率(mm/y)', '样本数', '状态']],
+    body: rateRows,
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 3 },
+    headStyles: { fillColor: [66, 139, 202] }
+  });
+
+  yPos = doc.lastAutoTable.finalY + 10;
+  if (yPos > 230) { doc.addPage(); yPos = 20; }
+
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('三、组对比统计', 14, yPos);
+  yPos += 8;
+
+  const s = report.summary || {};
+  const statsData = [
+    ['有效设备数', `${s.valid_devices || 0} / ${s.total_devices || 0}`, '超阈值设备数', s.over_threshold_count || 0],
+    ['平均速率', `${s.mean_rate ? s.mean_rate.toFixed(6) : '-'} mm/y`, '最大偏差率', `${s.max_deviation_ratio ? (s.max_deviation_ratio * 100).toFixed(1) : 0}%`],
+    ['最低速率', `${s.min_rate ? s.min_rate.toFixed(6) : '-'} mm/y`, '最低设备', s.slowest_device?.device_name || '-'],
+    ['最高速率', `${s.max_rate ? s.max_rate.toFixed(6) : '-'} mm/y`, '最高设备', s.fastest_device?.device_name || '-']
+  ];
+
+  autoTable(doc, {
+    startY: yPos,
+    body: statsData,
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 3 },
+    columnStyles: {
+      0: { cellWidth: 30, fontStyle: 'bold', fillColor: [240, 240, 240] },
+      1: { cellWidth: 50 },
+      2: { cellWidth: 30, fontStyle: 'bold', fillColor: [240, 240, 240] },
+      3: { cellWidth: 50 }
+    }
+  });
+
+  yPos = doc.lastAutoTable.finalY + 10;
+  if (yPos > 230) { doc.addPage(); yPos = 20; }
+
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('四、分析结论', 14, yPos);
+  yPos += 8;
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  (report.conclusions || [report.conclusion]).forEach((line, i) => {
+    const wrapped = doc.splitTextToSize(`结论${i + 1}: ${line}`, pageWidth - 28);
+    doc.text(wrapped, 14, yPos);
+    yPos += wrapped.length * 5 + 2;
+  });
+
+  doc.save(filePath);
+  return filePath;
+}
+
 module.exports = {
   generateCsvReport,
   exportCsv,
   generatePdfReport,
   exportPdf,
-  generateInspectionReport
+  generateInspectionReport,
+  generateComparisonReport,
+  exportComparisonReport
 };

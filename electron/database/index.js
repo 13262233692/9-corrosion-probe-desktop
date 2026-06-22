@@ -272,6 +272,176 @@ const configRepo = {
   }
 };
 
+const probeGroupRepo = {
+  create(group) {
+    const db = getDatabase();
+    const now = Date.now();
+    const stmt = db.prepare(`
+      INSERT INTO probe_group 
+      (name, description, device_addresses, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const addresses = Array.isArray(group.device_addresses) 
+      ? JSON.stringify(group.device_addresses) 
+      : group.device_addresses;
+    const result = stmt.run(
+      group.name,
+      group.description || null,
+      addresses,
+      group.enabled !== undefined ? (group.enabled ? 1 : 0) : 1,
+      now,
+      now
+    );
+    return result.lastInsertRowid;
+  },
+
+  findAll() {
+    const db = getDatabase();
+    const rows = db.prepare('SELECT * FROM probe_group ORDER BY created_at DESC').all();
+    return rows.map(r => ({
+      ...r,
+      device_addresses: JSON.parse(r.device_addresses)
+    }));
+  },
+
+  findById(id) {
+    const db = getDatabase();
+    const row = db.prepare('SELECT * FROM probe_group WHERE id = ?').get(id);
+    if (!row) return null;
+    return {
+      ...row,
+      device_addresses: JSON.parse(row.device_addresses)
+    };
+  },
+
+  findEnabled() {
+    const db = getDatabase();
+    const rows = db.prepare('SELECT * FROM probe_group WHERE enabled = 1 ORDER BY created_at DESC').all();
+    return rows.map(r => ({
+      ...r,
+      device_addresses: JSON.parse(r.device_addresses)
+    }));
+  },
+
+  update(id, updates) {
+    const db = getDatabase();
+    const now = Date.now();
+    const fields = [];
+    const values = [];
+
+    for (const [key, val] of Object.entries(updates)) {
+      if (key !== 'id') {
+        fields.push(`${key} = ?`);
+        if (key === 'device_addresses' && Array.isArray(val)) {
+          values.push(JSON.stringify(val));
+        } else if (key === 'enabled') {
+          values.push(val ? 1 : 0);
+        } else {
+          values.push(val);
+        }
+      }
+    }
+    fields.push('updated_at = ?');
+    values.push(now);
+    values.push(id);
+
+    const stmt = db.prepare(`UPDATE probe_group SET ${fields.join(', ')} WHERE id = ?`);
+    return stmt.run(...values).changes;
+  },
+
+  delete(id) {
+    const db = getDatabase();
+    db.prepare('DELETE FROM group_alarm_rule WHERE group_id = ?').run(id);
+    return db.prepare('DELETE FROM probe_group WHERE id = ?').run(id).changes;
+  }
+};
+
+const groupAlarmRuleRepo = {
+  create(rule) {
+    const db = getDatabase();
+    const now = Date.now();
+    const stmt = db.prepare(`
+      INSERT INTO group_alarm_rule 
+      (group_id, rule_type, threshold, level, window_hours, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      rule.group_id,
+      rule.rule_type,
+      rule.threshold,
+      rule.level || 'warning',
+      rule.window_hours || 24,
+      rule.enabled !== undefined ? (rule.enabled ? 1 : 0) : 1,
+      now,
+      now
+    );
+    return result.lastInsertRowid;
+  },
+
+  findAll() {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT r.*, g.name as group_name 
+      FROM group_alarm_rule r
+      LEFT JOIN probe_group g ON r.group_id = g.id
+      ORDER BY r.created_at DESC
+    `).all();
+  },
+
+  findByGroupId(groupId) {
+    const db = getDatabase();
+    return db.prepare('SELECT * FROM group_alarm_rule WHERE group_id = ? ORDER BY created_at DESC').all(groupId);
+  },
+
+  findEnabledByGroupId(groupId) {
+    const db = getDatabase();
+    return db.prepare('SELECT * FROM group_alarm_rule WHERE group_id = ? AND enabled = 1 ORDER BY created_at DESC').all(groupId);
+  },
+
+  findEnabled() {
+    const db = getDatabase();
+    return db.prepare(`
+      SELECT r.*, g.name as group_name, g.device_addresses
+      FROM group_alarm_rule r
+      LEFT JOIN probe_group g ON r.group_id = g.id
+      WHERE r.enabled = 1 AND g.enabled = 1
+      ORDER BY r.created_at DESC
+    `).all().map(r => ({
+      ...r,
+      device_addresses: JSON.parse(r.device_addresses)
+    }));
+  },
+
+  update(id, updates) {
+    const db = getDatabase();
+    const now = Date.now();
+    const fields = [];
+    const values = [];
+
+    for (const [key, val] of Object.entries(updates)) {
+      if (key !== 'id') {
+        fields.push(`${key} = ?`);
+        if (key === 'enabled') {
+          values.push(val ? 1 : 0);
+        } else {
+          values.push(val);
+        }
+      }
+    }
+    fields.push('updated_at = ?');
+    values.push(now);
+    values.push(id);
+
+    const stmt = db.prepare(`UPDATE group_alarm_rule SET ${fields.join(', ')} WHERE id = ?`);
+    return stmt.run(...values).changes;
+  },
+
+  delete(id) {
+    const db = getDatabase();
+    return db.prepare('DELETE FROM group_alarm_rule WHERE id = ?').run(id).changes;
+  }
+};
+
 module.exports = {
   initDatabase,
   getDatabase,
@@ -280,5 +450,7 @@ module.exports = {
   probeReadingRepo,
   corrosionRateRepo,
   alarmEventRepo,
-  configRepo
+  configRepo,
+  probeGroupRepo,
+  groupAlarmRuleRepo
 };

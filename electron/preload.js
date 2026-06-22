@@ -94,5 +94,40 @@ contextBridge.exposeInMainWorld('electronAPI', {
   protocol: {
     compensate: (resistance, temperature) =>
       ipcRenderer.invoke('protocol:compensate', resistance, temperature)
+  },
+
+  group: {
+    list: () => ipcRenderer.invoke('group:list'),
+    create: (group) => ipcRenderer.invoke('group:create', group),
+    update: (id, updates) => ipcRenderer.invoke('group:update', id, updates),
+    delete: (id) => ipcRenderer.invoke('group:delete', id),
+    get: (id) => ipcRenderer.invoke('group:get', id)
+  },
+
+  groupRule: {
+    list: (groupId) => ipcRenderer.invoke('group-rule:list', groupId),
+    create: (rule) => ipcRenderer.invoke('group-rule:create', rule),
+    update: (id, updates) => ipcRenderer.invoke('group-rule:update', id, updates),
+    delete: (id) => ipcRenderer.invoke('group-rule:delete', id)
+  },
+
+  comparison: {
+    getRates: (deviceAddresses, options) =>
+      ipcRenderer.invoke('comparison:rates', deviceAddresses, options),
+    getTrends: (deviceAddresses, startTime, endTime, options) =>
+      ipcRenderer.invoke('comparison:trends', deviceAddresses, startTime, endTime, options),
+    evaluate: (groupId) => ipcRenderer.invoke('comparison:evaluate', groupId),
+    getReport: (deviceAddresses, options) =>
+      ipcRenderer.invoke('comparison:report', deviceAddresses, options),
+    onNewGroupAlarm: (callback) => {
+      const listener = (event, data) => callback(data);
+      ipcRenderer.on('group-alarm:new', listener);
+      return () => ipcRenderer.removeListener('group-alarm:new', listener);
+    }
+  },
+
+  reportExtra: {
+    exportComparison: (deviceAddresses, options) =>
+      ipcRenderer.invoke('report:export-comparison', deviceAddresses, options)
   }
 });
