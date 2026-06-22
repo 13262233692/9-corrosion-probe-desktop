@@ -19,12 +19,21 @@ class SerialManager extends EventEmitter {
     };
     this.isConnected = false;
     this.isConnecting = false;
+    this._connectionLock = Promise.resolve();
+    this._connectionId = 0;
+    this._manualDisconnect = false;
+    this._pendingFrameBuffer = null;
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
     this.readTimer = null;
     this.lastReading = null;
     this.offlineCache = [];
     this.maxCacheSize = 10000;
+
+    this._onDataBound = this._onData.bind(this);
+    this._onErrorBound = this._onError.bind(this);
+    this._onCloseBound = this._onClose.bind(this);
+    this._onOpenBound = this._onOpen.bind(this);
   }
 
   async listPorts() {
@@ -43,64 +52,148 @@ class SerialManager extends EventEmitter {
   }
 
   async connect(config) {
-    if (this.isConnecting) {
-      throw new Error('正在连接中，请稍候...');
-    }
-
-    this.config = { ...this.config, ...config };
-    this.isConnecting = true;
+    this._manualDisconnect = false;
     this.reconnectAttempts = 0;
 
-    try {
-      await this._doConnect();
-      this.isConnecting = false;
-      this.isConnected = true;
-      this.emit('connected', this.config);
-      this._startReading();
-      return true;
-    } catch (err) {
-      this.isConnecting = false;
-      this.emit('connection-error', err.message);
-      throw err;
-    }
-  }
-
-  _doConnect() {
-    return new Promise((resolve, reject) => {
-      if (this.port) {
-        try {
-          this.port.removeAllListeners();
-          if (this.port.isOpen) {
-            this.port.close(() => {});
-          }
-        } catch (e) {}
-        this.port = null;
+    return this._withLock(async () => {
+      if (this.isConnected && this.port && this.port.isOpen) {
+        return true;
       }
 
-      this.frameParser.reset();
+      if (this.port) {
+        await this._cleanupPort();
+      }
 
-      this.port = new SerialPort({
-        path: this.config.path,
-        baudRate: Number(this.config.baudRate),
-        autoOpen: false
+      this.config = { ...this.config, ...config };
+      this.isConnecting = true;
+      this._connectionId++;
+      const currentConnectionId = this._connectionId;
+
+      try {
+        await this._doConnect(currentConnectionId);
+
+        if (this._connectionId !== currentConnectionId) {
+          await this._cleanupPort().catch(() => {});
+          throw new Error('连接已被新的连接请求取代');
+        }
+
+        this.isConnecting = false;
+        this.isConnected = true;
+        this.emit('connected', this.config);
+        this._startReading();
+        return true;
+      } catch (err) {
+        this.isConnecting = false;
+        this._cleanupPort().catch(() => {});
+        this.emit('connection-error', err.message);
+        throw err;
+      }
+    });
+  }
+
+  _withLock(operation) {
+    this._connectionLock = this._connectionLock
+      .then(() => operation())
+      .catch(err => {
+        throw err;
       });
+    return this._connectionLock;
+  }
 
-      this.port.on('data', (data) => this._onData(data));
-      this.port.on('error', (err) => this._onError(err));
-      this.port.on('close', () => this._onClose());
-      this.port.on('open', () => {
-        resolve();
-      });
-
-      this.port.open((err) => {
+  _doConnect(connectionId) {
+    return new Promise((resolve, reject) => {
+      const openHandler = (err) => {
+        if (this._connectionId !== connectionId) {
+          reject(new Error('连接已过期'));
+          return;
+        }
         if (err) {
           reject(new Error(`打开串口失败: ${err.message}`));
         }
-      });
+      };
+
+      const setupPort = () => {
+        if (this._pendingFrameBuffer && this._pendingFrameBuffer.length > 0) {
+          this.frameParser.buffer = this._pendingFrameBuffer;
+          this._pendingFrameBuffer = null;
+        } else {
+          this.frameParser.reset();
+        }
+
+        this.port = new SerialPort({
+          path: this.config.path,
+          baudRate: Number(this.config.baudRate),
+          autoOpen: false
+        });
+
+        this.port.on('data', this._onDataBound);
+        this.port.on('error', this._onErrorBound);
+        this.port.on('close', this._onCloseBound);
+        this.port.on('open', this._onOpenBound);
+
+        this._openResolve = resolve;
+        this._openReject = reject;
+        this._currentConnectionId = connectionId;
+
+        this.port.open(openHandler);
+      };
+
+      if (this.port) {
+        this._cleanupPort()
+          .then(setupPort)
+          .catch(() => setupPort());
+      } else {
+        setupPort();
+      }
+    });
+  }
+
+  _onOpen() {
+    if (this._openResolve && this._currentConnectionId === this._connectionId) {
+      this._openResolve();
+    }
+    this._openResolve = null;
+    this._openReject = null;
+  }
+
+  async _cleanupPort() {
+    return new Promise((resolve) => {
+      const port = this.port;
+      if (!port) {
+        resolve();
+        return;
+      }
+
+      this._pendingFrameBuffer = Buffer.from(this.frameParser.buffer);
+
+      try {
+        port.removeListener('data', this._onDataBound);
+        port.removeListener('error', this._onErrorBound);
+        port.removeListener('close', this._onCloseBound);
+        port.removeListener('open', this._onOpenBound);
+      } catch (e) {}
+
+      this._stopReading();
+
+      if (port.isOpen) {
+        port.drain(() => {
+          port.close((err) => {
+            this.port = null;
+            resolve(!err);
+          });
+        });
+      } else {
+        this.port = null;
+        resolve(true);
+      }
     });
   }
 
   _onData(data) {
+    if (!this.port || this._connectionId !== this._currentConnectionId) {
+      return;
+    }
+
     const frames = this.frameParser.feed(data);
 
     for (const frame of frames) {
@@ -146,7 +239,11 @@ class SerialManager extends EventEmitter {
     this.isConnected = false;
     this._stopReading();
 
-    if (wasConnected) {
+    if (this._pendingFrameBuffer === null) {
+      this._pendingFrameBuffer = Buffer.from(this.frameParser.buffer);
+    }
+
+    if (wasConnected && !this._manualDisconnect) {
       this.emit('disconnected');
       this._scheduleReconnect();
     }
@@ -158,23 +255,47 @@ class SerialManager extends EventEmitter {
       return;
     }
 
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     this.reconnectAttempts++;
     this.emit('reconnecting', {
       attempt: this.reconnectAttempts,
       maxAttempts: MAX_RECONNECT_ATTEMPTS
     });
 
-    this.reconnectTimer = setTimeout(async () => {
-      try {
-        await this._doConnect();
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
-        this.emit('reconnected');
-        this._startReading();
-        this._flushCache();
-      } catch (err) {
+    this.reconnectTimer = setTimeout(() => {
+      this._withLock(async () => {
+        if (this._manualDisconnect || this.isConnected) {
+          return;
+        }
+
+        this.isConnecting = true;
+        this._connectionId++;
+        const currentConnectionId = this._connectionId;
+
+        try {
+          await this._doConnect(currentConnectionId);
+
+          if (this._connectionId !== currentConnectionId) {
+            return;
+          }
+
+          this.isConnecting = false;
+          this.isConnected = true;
+          this.reconnectAttempts = 0;
+          this.emit('reconnected');
+          this._startReading();
+          this._flushCache();
+        } catch (err) {
+          this.isConnecting = false;
+          this._scheduleReconnect();
+        }
+      }).catch(() => {
         this._scheduleReconnect();
-      }
+      });
     }, DEFAULT_RECONNECT_INTERVAL);
   }
 
@@ -182,7 +303,7 @@ class SerialManager extends EventEmitter {
     this._stopReading();
 
     this.readTimer = setInterval(() => {
-      if (this.port && this.port.isOpen) {
+      if (this.port && this.port.isOpen && this.isConnected) {
         const cmd = buildReadCommand(this.config.deviceAddress);
         this.port.write(cmd, (err) => {
           if (err) {
@@ -218,35 +339,29 @@ class SerialManager extends EventEmitter {
   }
 
   async disconnect() {
-    this._stopReading();
+    this._manualDisconnect = true;
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
-    if (this.port) {
-      return new Promise((resolve) => {
-        if (this.port.isOpen) {
-          this.port.close((err) => {
-            this.port = null;
-            this.isConnected = false;
-            this.isConnecting = false;
-            this.emit('disconnected');
-            resolve(!err);
-          });
-        } else {
-          this.port = null;
-          this.isConnected = false;
-          this.isConnecting = false;
-          resolve(true);
-        }
-      });
-    }
+    return this._withLock(async () => {
+      this._stopReading();
 
-    this.isConnected = false;
-    this.isConnecting = false;
-    return true;
+      const wasConnected = this.isConnected;
+      await this._cleanupPort();
+
+      this.isConnected = false;
+      this.isConnecting = false;
+
+      if (wasConnected) {
+        this.emit('disconnected');
+      }
+
+      this._pendingFrameBuffer = null;
+      return true;
+    });
   }
 
   getStatus() {
@@ -256,7 +371,9 @@ class SerialManager extends EventEmitter {
       config: { ...this.config },
       reconnectAttempts: this.reconnectAttempts,
       cacheSize: this.offlineCache.length,
-      lastReading: this.lastReading
+      lastReading: this.lastReading,
+      connectionId: this._connectionId,
+      hasPendingBuffer: this._pendingFrameBuffer && this._pendingFrameBuffer.length > 0
     };
   }
 
